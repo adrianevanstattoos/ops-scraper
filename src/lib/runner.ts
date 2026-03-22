@@ -1,9 +1,64 @@
-import { flattenActiveAccounts } from "./flatten";
+import { flattenActiveAccounts, findAccountJobById } from "./flatten";
 import { getClients, getSeen, getSettings, putSeen, updateLastSyncedAt } from "./kv";
-import type { AccountRunResult, Env, RunSummary } from "./types";
+import type { AccountJob, AccountRunResult, Env, RunSummary } from "./types";
 import { getLatestContentForAccount } from "../platforms";
 
-export async function runScrape(env: Env): Promise<RunSummary> {
+async function runOneAccount(
+  env: Env,
+  account: AccountJob,
+  dryRun: boolean
+): Promise<AccountRunResult> {
+  const latest = await getLatestContentForAccount(account);
+
+  if (!latest?.latestContentUrl) {
+    return {
+      accountId: account.accountId,
+      clientName: account.clientName,
+      platform: account.platform,
+      handle: account.handle,
+      status: "skipped",
+      reason: "no_latest_content_found"
+    };
+  }
+
+  const existing = await getSeen(env, account.accountId);
+  const previousUrl = existing?.postUrl ?? null;
+  const latestUrl = latest.latestContentUrl;
+
+  if (previousUrl === latestUrl) {
+    return {
+      accountId: account.accountId,
+      clientName: account.clientName,
+      platform: account.platform,
+      handle: account.handle,
+      status: "unchanged",
+      previousUrl,
+      latestUrl
+    };
+  }
+
+  if (!dryRun) {
+    await putSeen(env, account.accountId, {
+      postUrl: latestUrl,
+      seenAt: latest.scrapedAt
+    });
+  }
+
+  return {
+    accountId: account.accountId,
+    clientName: account.clientName,
+    platform: account.platform,
+    handle: account.handle,
+    status: "updated",
+    previousUrl,
+    latestUrl
+  };
+}
+
+export async function runScrape(
+  env: Env,
+  opts?: { accountId?: string }
+): Promise<RunSummary> {
   const startedAt = new Date().toISOString();
 
   const clients = await getClients(env);
@@ -26,7 +81,7 @@ export async function runScrape(env: Env): Promise<RunSummary> {
   if (!settings.sync_enabled) {
     summary.finishedAt = new Date().toISOString();
     summary.results.push({
-      accountId: "",
+      accountId: opts?.accountId || "",
       clientName: "",
       platform: "instagram",
       handle: "",
@@ -36,80 +91,51 @@ export async function runScrape(env: Env): Promise<RunSummary> {
     return summary;
   }
 
-  const jobs = flattenActiveAccounts(clients, settings);
+  let jobs: AccountJob[] = [];
+
+  if (opts?.accountId) {
+    const one = findAccountJobById(clients, settings, opts.accountId);
+    if (!one) {
+      summary.ok = false;
+      summary.finishedAt = new Date().toISOString();
+      summary.results.push({
+        accountId: opts.accountId,
+        clientName: "",
+        platform: "instagram",
+        handle: "",
+        status: "failed",
+        reason: "account_not_found_or_not_active"
+      });
+      summary.failed = 1;
+      return summary;
+    }
+    jobs = [one];
+  } else {
+    jobs = flattenActiveAccounts(clients, settings);
+  }
+
   summary.totalAccounts = jobs.length;
 
   for (const account of jobs) {
-    let result: AccountRunResult;
-
     try {
       summary.checked += 1;
-
-      const latest = await getLatestContentForAccount(account);
-
-      if (!latest?.latestContentUrl) {
-        result = {
-          accountId: account.accountId,
-          clientName: account.clientName,
-          platform: account.platform,
-          handle: account.handle,
-          status: "skipped",
-          reason: "no_latest_content_found"
-        };
-        summary.skipped += 1;
-        summary.results.push(result);
-        continue;
-      }
-
-      const existing = await getSeen(env, account.accountId);
-      const previousUrl = existing?.postUrl ?? null;
-      const latestUrl = latest.latestContentUrl;
-
-      if (previousUrl === latestUrl) {
-        result = {
-          accountId: account.accountId,
-          clientName: account.clientName,
-          platform: account.platform,
-          handle: account.handle,
-          status: "unchanged",
-          previousUrl,
-          latestUrl
-        };
-        summary.unchanged += 1;
-        summary.results.push(result);
-        continue;
-      }
-
-      if (!settings.dry_run) {
-        await putSeen(env, account.accountId, {
-          postUrl: latestUrl,
-          seenAt: latest.scrapedAt
-        });
-      }
-
-      result = {
-        accountId: account.accountId,
-        clientName: account.clientName,
-        platform: account.platform,
-        handle: account.handle,
-        status: "updated",
-        previousUrl,
-        latestUrl
-      };
-      summary.updated += 1;
+      const result = await runOneAccount(env, account, settings.dry_run);
       summary.results.push(result);
+
+      if (result.status === "updated") summary.updated += 1;
+      if (result.status === "unchanged") summary.unchanged += 1;
+      if (result.status === "skipped") summary.skipped += 1;
     } catch (error) {
-      result = {
+      summary.ok = false;
+      summary.failed += 1;
+      summary.results.push({
         accountId: account.accountId,
         clientName: account.clientName,
         platform: account.platform,
         handle: account.handle,
         status: "failed",
         reason: error instanceof Error ? error.message : "unknown_error"
-      };
-      summary.failed += 1;
-      summary.results.push(result);
-      summary.ok = false;
+      });
     }
   }
 
