@@ -3,6 +3,38 @@ import { getClients, getSeen, getSettings, putSeen, updateLastSyncedAt } from ".
 import type { AccountJob, AccountRunResult, Env, RunSummary } from "./types";
 import { getLatestContentForAccount } from "../platforms";
 
+const INSTAGRAM_DELAY_MIN_MS = 2500;
+const INSTAGRAM_DELAY_MAX_MS = 4500;
+const INSTAGRAM_FAILURE_DELAY_MS = 8000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function randomInt(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function isInstagramRateLimitError(message: string): boolean {
+  const msg = String(message || "").toLowerCase();
+  return msg.includes("429") || msg.includes("rate limit");
+}
+
+async function maybePauseBeforeAccount(account: AccountJob): Promise<void> {
+  if (account.platform !== "instagram") return;
+
+  const delay = randomInt(INSTAGRAM_DELAY_MIN_MS, INSTAGRAM_DELAY_MAX_MS);
+  await sleep(delay);
+}
+
+async function maybePauseAfterFailure(account: AccountJob, errorMessage: string): Promise<void> {
+  if (account.platform !== "instagram") return;
+
+  if (isInstagramRateLimitError(errorMessage)) {
+    await sleep(INSTAGRAM_FAILURE_DELAY_MS);
+  }
+}
+
 async function runOneAccount(
   env: Env,
   account: AccountJob,
@@ -116,8 +148,13 @@ export async function runScrape(
 
   summary.totalAccounts = jobs.length;
 
-  for (const account of jobs) {
+  for (let i = 0; i < jobs.length; i++) {
+    const account = jobs[i];
+
     try {
+      // Gentle pacing for Instagram only
+      await maybePauseBeforeAccount(account);
+
       summary.checked += 1;
       const result = await runOneAccount(env, account, settings.dry_run);
       summary.results.push(result);
@@ -128,14 +165,19 @@ export async function runScrape(
     } catch (error) {
       summary.ok = false;
       summary.failed += 1;
+
+      const reason = error instanceof Error ? error.message : "unknown_error";
+
       summary.results.push({
         accountId: account.accountId,
         clientName: account.clientName,
         platform: account.platform,
         handle: account.handle,
         status: "failed",
-        reason: error instanceof Error ? error.message : "unknown_error"
+        reason
       });
+
+      await maybePauseAfterFailure(account, reason);
     }
   }
 
