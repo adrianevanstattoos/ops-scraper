@@ -91,4 +91,35 @@ export async function putScrapeMeta(
 ) {
   await env.DB.put(`scrape_meta:${accountId}`, JSON.stringify(value));
 }
+
+
+  export async function getLatestCache(
+  env: Env,
+  platform: string,
+  accountId: string
+) {
+  const raw = await env.DB.get(`latest_cache:${platform}:${accountId}`);
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+export async function putLatestCache(
+  env: Env,
+  platform: string,
+  accountId: string,
+  data: unknown
+) {
+  await env.DB.put(
+    `latest_cache:${platform}:${accountId}`,
+    JSON.stringify({
+      savedAt: new Date().toISOString(),
+      data
+    })
+  );
+}
 }
