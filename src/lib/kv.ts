@@ -66,4 +66,29 @@ export async function updateLastSyncedAt(
     last_synced_at: iso
   };
   await env.DB.put(SETTINGS_KEY, JSON.stringify(next));
+
+
+  export async function getScrapeMeta(env: Env, accountId: string) {
+  const raw = await env.DB.get(`scrape_meta:${accountId}`);
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+export async function putScrapeMeta(
+  env: Env,
+  accountId: string,
+  value: {
+    lastAttemptAt: string;
+    lastSuccessAt?: string | null;
+    lastStatus?: string | null;
+    lastLatestContentUrl?: string | null;
+  }
+) {
+  await env.DB.put(`scrape_meta:${accountId}`, JSON.stringify(value));
+}
 }
