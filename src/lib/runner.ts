@@ -40,7 +40,7 @@ async function runOneAccount(
   account: AccountJob,
   dryRun: boolean
 ): Promise<AccountRunResult> {
-  const latest = await getLatestContentForAccount(account);
+  const latest = await getLatestContentForAccount(account, env);
 
   if (!latest?.latestContentUrl) {
     return {
