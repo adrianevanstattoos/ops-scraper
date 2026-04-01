@@ -37,6 +37,12 @@ export default {
       });
     }
 
+    // NEW: Live progress endpoint (public or protected — I left it open for simplicity)
+    if (url.pathname === "/progress" && request.method === "GET") {
+      const data = await env.DB.get("scraper:progress", { type: "json" });
+      return json(data || { progressPercent: 0, status: "idle" });
+    }
+
     if (url.pathname === "/run" && request.method === "POST") {
       if (!hasValidRunToken(request, env)) return unauthorized();
       const summary = await runScrape(env);
