@@ -1,37 +1,33 @@
+export type Platform = "instagram" | "youtube" | "tiktok" | "facebook";
+
 export interface Env {
   DB: KVNamespace;
   SCRAPFLY_API_KEY?: string;
-  SCRAPER_RUN_TOKEN?: string;
+  SCRAPFLY_ENABLED?: string;
 }
 
-export type Platform = "instagram" | "facebook" | "tiktok" | "youtube";
-
-export interface ClientAccount {
+export interface AccountRecord {
   id: string;
   platform: Platform;
   handle: string;
   profileUrl: string;
-  active: boolean;
+  active?: boolean;
 }
 
 export interface ClientRecord {
   id: string;
   name: string;
-  status: string;
-  notes?: string;
-  accounts: ClientAccount[];
+  active?: boolean;
+  package?: "starter" | "growth" | "professional" | "elite";
+  accounts: AccountRecord[];
 }
 
 export interface SettingsRecord {
-  last_synced_at: string | null;
-  dry_run: boolean;
-  sync_enabled: boolean;
-  default_platforms: Platform[];
-}
-
-export interface SeenRecord {
-  postUrl: string;
-  seenAt: string;
+  dry_run?: boolean;
+  sync_enabled?: boolean;
+  default_platforms?: Platform[];
+  package_rules?: Record<string, { weekly_target: number }>;
+  last_synced_at?: string | null;
 }
 
 export interface AccountJob {
@@ -41,29 +37,28 @@ export interface AccountJob {
   platform: Platform;
   handle: string;
   profileUrl: string;
+  package?: string;
 }
 
-export interface LatestContent {
-  platform: Platform;
-  accountId: string;
-  handle: string;
-  latestContentId: string | null;
-  latestContentUrl: string | null;
-  contentType: string | null;
-  publishedAt: string | null;
-  scrapedAt: string;
-  raw?: unknown;
-}
+export type AccountRunStatus =
+  | "updated"
+  | "unchanged"
+  | "skipped"
+  | "failed";
 
 export interface AccountRunResult {
   accountId: string;
+  clientId: string;
   clientName: string;
   platform: Platform;
   handle: string;
-  status: "updated" | "unchanged" | "skipped" | "failed";
-  reason?: string;
-  previousUrl?: string | null;
-  latestUrl?: string | null;
+  profileUrl: string;
+  status: AccountRunStatus;
+  postUrl?: string | null;
+  postId?: string | null;
+  reason?: string | null;
+  error?: string | null;
+  source?: "direct" | "scrapfly" | "unknown";
 }
 
 export interface RunSummary {
@@ -78,4 +73,69 @@ export interface RunSummary {
   failed: number;
   dryRun: boolean;
   results: AccountRunResult[];
+}
+
+export type JobStatus = "queued" | "running" | "done" | "failed";
+
+export interface JobErrorItem {
+  at: string;
+  accountId?: string;
+  platform?: Platform;
+  message: string;
+  detail?: string;
+}
+
+export interface ScrapeJobRecord {
+  id: string;
+  mode: "all" | "account";
+  accountId: string | null;
+  status: JobStatus;
+  startedAt: string | null;
+  finishedAt: string | null;
+  progressPercent: number;
+  totalAccounts: number;
+  processed: number;
+  updated: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  statusText: string;
+  error: string | null;
+  errors: JobErrorItem[];
+  result: RunSummary | { ok: false; error?: string; results?: AccountRunResult[] } | null;
+  updatedAt: string;
+}
+
+export interface SeenRecord {
+  accountId: string;
+  platform: Platform;
+  profileUrl: string;
+  lastPostUrl: string;
+  lastPostId?: string | null;
+  seenAt: string;
+  source?: "direct" | "scrapfly" | "unknown";
+}
+
+export interface QueueItem {
+  id: string;
+  accountId: string;
+  clientId: string;
+  clientName: string;
+  platform: Platform;
+  handle: string;
+  profileUrl: string;
+  postUrl: string;
+  createdAt: string;
+  completedAt?: string | null;
+  status: "pending" | "completed";
+  notes?: string;
+  source?: "direct" | "scrapfly" | "unknown";
+}
+
+export interface LatestContentResult {
+  ok: boolean;
+  postUrl?: string | null;
+  postId?: string | null;
+  reason?: string | null;
+  source?: "direct" | "scrapfly" | "unknown";
 }
