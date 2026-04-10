@@ -1,7 +1,7 @@
 import type { Env, LatestContentResult } from "../types";
 import { fetchHtml } from "../lib/http";
 
-export async function getLatestFacebook(
+export async function getLatestTikTok(
   env: Env,
   profileUrl: string
 ): Promise<LatestContentResult> {
@@ -13,20 +13,17 @@ export async function getLatestFacebook(
   const html = page.html || "";
 
   const patterns = [
-    /https:\/\/www\.facebook\.com\/[^\/"]+\/posts\/([A-Za-z0-9_-]+)/i,
-    /https:\/\/www\.facebook\.com\/[^\/"]+\/videos\/([A-Za-z0-9_-]+)/i,
-    /"story":{"url":"(https:\\\/\\\/www\.facebook\.com\\\/[^"]+)"/i,
+    /https:\/\/www\.tiktok\.com\/@[^\/"]+\/video\/(\d+)/i,
+    /"canonical":"(https:\/\/www\.tiktok\.com\/@[^"]+\/video\/(\d+))"/i,
+    /"shareMeta":\{"title":[^}]*"url":"(https:\/\/www\.tiktok\.com\/@[^"]+\/video\/(\d+))"/i,
   ];
 
   for (const pattern of patterns) {
     const match = html.match(pattern);
     if (!match) continue;
 
-    const postUrl = (match[1]?.startsWith?.("https://") ? match[1] : match[0]).replace(
-      /\\\//g,
-      "/"
-    );
-    const idMatch = postUrl.match(/\/(?:posts|videos)\/([A-Za-z0-9_-]+)/i);
+    const postUrl = match[1].startsWith("https://") ? match[1] : match[0];
+    const idMatch = postUrl.match(/\/video\/(\d+)/i);
 
     return {
       ok: true,
