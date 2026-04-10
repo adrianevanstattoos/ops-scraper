@@ -178,7 +178,6 @@ async function runScrapeJob(
       }
 
       processed += 1;
-
       failed = results.filter((r) => r.status === "failed").length;
 
       await patchJob(env, jobId, {
@@ -246,7 +245,7 @@ async function runScrapeJob(
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
@@ -282,16 +281,29 @@ export default {
         const accounts = flattenActiveAccounts(clients, settings, accountId);
         const dryRun = !!settings.dry_run;
 
-        const summary = await runScrapeJob(env, jobId, accounts, { dryRun });
+        ctx.waitUntil(
+          runScrapeJob(env, jobId, accounts, { dryRun }).catch(async (error: any) => {
+            try {
+              await patchJob(env, jobId, {
+                status: "failed",
+                finishedAt: new Date().toISOString(),
+                statusText: "failed",
+                error: error?.message || "Background job failed",
+              });
+            } catch {}
+          })
+        );
 
         return json({
+          ok: true,
           id: jobId,
           mode,
           accountId,
-          status: "done",
-          startedAt: summary.startedAt,
-          finishedAt: summary.finishedAt,
-          result: summary,
+          status: "running",
+          startedAt: new Date().toISOString(),
+          totalAccounts: accounts.length,
+          progressPercent: 0,
+          processed: 0,
         });
       }
 
@@ -315,7 +327,11 @@ export default {
       if (url.pathname === "/debug/queue" && request.method === "GET") {
         const raw = await env.DB.get("queue");
         return new Response(raw || "[]", {
-          headers: { "content-type": "application/json; charset=utf-8" },
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "cache-control": "no-store",
+            "access-control-allow-origin": "*",
+          },
         });
       }
 
