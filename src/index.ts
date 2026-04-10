@@ -1,160 +1,334 @@
-import type { Env, RunSummary } from "./lib/types";
-import { runScrape } from "./lib/runner";
+import type {
+  AccountJob,
+  AccountRunResult,
+  Env,
+  QueueItem,
+  RunSummary,
+} from "./types";
+import { appendJobError, calcProgress, createJob, patchJob } from "./lib/jobs";
+import {
+  enqueueIfNew,
+  flattenActiveAccounts,
+  getClients,
+  getSeen,
+  getSettings,
+  putSeen,
+  putSettings,
+} from "./lib/kv";
+import { getLatestForPlatform } from "./platforms";
 
-type ScrapeJobRecord = {
-  id: string;
-  mode: "all" | "one";
-  accountId: string | null;
-  status: "running" | "completed" | "failed";
-  startedAt: string;
-  finishedAt: string | null;
-  result: RunSummary | null;
-  error: string | null;
-};
-
-function json(data: unknown, init?: ResponseInit): Response {
+function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data, null, 2), {
+    status,
     headers: {
-      "content-type": "application/json; charset=utf-8"
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "access-control-allow-origin": "*",
     },
-    ...init
   });
 }
 
-function unauthorized() {
-  return json({ ok: false, error: "unauthorized" }, { status: 401 });
+function getJobId(): string {
+  return `scrape_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
 }
 
-function hasValidRunToken(request: Request, env: Env): boolean {
-  const headerToken = request.headers.get("x-run-token");
-  return !!env.SCRAPER_RUN_TOKEN && headerToken === env.SCRAPER_RUN_TOKEN;
-}
-
-function makeJobId(): string {
-  return `scrape_${crypto.randomUUID().slice(0, 8)}`;
-}
-
-async function putCurrentJob(env: Env, job: ScrapeJobRecord): Promise<void> {
-  await env.DB.put("scraper:current_job", JSON.stringify(job));
-}
-
-async function runAndTrackJob(
+async function processAccount(
   env: Env,
-  opts?: { accountId?: string }
+  account: AccountJob,
+  opts: { dryRun?: boolean } = {}
+): Promise<AccountRunResult> {
+  const latest = await getLatestForPlatform(env, account);
+
+  if (!latest.ok || !latest.postUrl) {
+    return {
+      accountId: account.accountId,
+      clientId: account.clientId,
+      clientName: account.clientName,
+      platform: account.platform,
+      handle: account.handle,
+      profileUrl: account.profileUrl,
+      status: "skipped",
+      reason: latest.reason || "no_latest_content_found",
+      source: latest.source || "unknown",
+    };
+  }
+
+  const seen = await getSeen(env, account.accountId);
+
+  if (seen?.lastPostUrl === latest.postUrl) {
+    return {
+      accountId: account.accountId,
+      clientId: account.clientId,
+      clientName: account.clientName,
+      platform: account.platform,
+      handle: account.handle,
+      profileUrl: account.profileUrl,
+      status: "unchanged",
+      postUrl: latest.postUrl,
+      postId: latest.postId || null,
+      source: latest.source || "unknown",
+    };
+  }
+
+  if (!opts.dryRun) {
+    const queueItem: QueueItem = {
+      id: crypto.randomUUID(),
+      accountId: account.accountId,
+      clientId: account.clientId,
+      clientName: account.clientName,
+      platform: account.platform,
+      handle: account.handle,
+      profileUrl: account.profileUrl,
+      postUrl: latest.postUrl,
+      createdAt: new Date().toISOString(),
+      status: "pending",
+      notes: "Pulled from scraper",
+      source: latest.source || "unknown",
+    };
+
+    await enqueueIfNew(env, queueItem);
+
+    await putSeen(env, account.accountId, {
+      accountId: account.accountId,
+      platform: account.platform,
+      profileUrl: account.profileUrl,
+      lastPostUrl: latest.postUrl,
+      lastPostId: latest.postId || null,
+      seenAt: new Date().toISOString(),
+      source: latest.source || "unknown",
+    });
+  }
+
+  return {
+    accountId: account.accountId,
+    clientId: account.clientId,
+    clientName: account.clientName,
+    platform: account.platform,
+    handle: account.handle,
+    profileUrl: account.profileUrl,
+    status: "updated",
+    postUrl: latest.postUrl,
+    postId: latest.postId || null,
+    source: latest.source || "unknown",
+  };
+}
+
+async function runScrapeJob(
+  env: Env,
+  jobId: string,
+  accounts: AccountJob[],
+  opts: { dryRun?: boolean } = {}
 ): Promise<RunSummary> {
+  const totalAccounts = accounts.length;
+
+  await patchJob(env, jobId, {
+    status: "running",
+    totalAccounts,
+    processed: 0,
+    updated: 0,
+    unchanged: 0,
+    skipped: 0,
+    failed: 0,
+    progressPercent: 0,
+    statusText: totalAccounts ? `processing 0/${totalAccounts}` : "no accounts",
+  });
+
+  const results: AccountRunResult[] = [];
+  let processed = 0;
+  let updated = 0;
+  let unchanged = 0;
+  let skipped = 0;
+  let failed = 0;
   const startedAt = new Date().toISOString();
 
-  const job: ScrapeJobRecord = {
-    id: makeJobId(),
-    mode: opts?.accountId ? "one" : "all",
-    accountId: opts?.accountId ?? null,
-    status: "running",
-    startedAt,
-    finishedAt: null,
-    result: null,
-    error: null
-  };
-
-  await putCurrentJob(env, job);
-
   try {
-    const summary = await runScrape(env, opts);
+    for (const account of accounts) {
+      await patchJob(env, jobId, {
+        statusText: `processing ${processed + 1}/${totalAccounts}`,
+      });
 
-    await putCurrentJob(env, {
-      ...job,
-      status: "completed",
-      finishedAt: summary.finishedAt,
+      try {
+        const result = await processAccount(env, account, opts);
+        results.push(result);
+
+        if (result.status === "updated") updated += 1;
+        else if (result.status === "unchanged") unchanged += 1;
+        else if (result.status === "skipped") skipped += 1;
+        else if (result.status === "failed") failed += 1;
+      } catch (error: any) {
+        results.push({
+          accountId: account.accountId,
+          clientId: account.clientId,
+          clientName: account.clientName,
+          platform: account.platform,
+          handle: account.handle,
+          profileUrl: account.profileUrl,
+          status: "failed",
+          error: error?.message || "Unknown account error",
+          source: "unknown",
+        });
+
+        await appendJobError(env, jobId, {
+          at: new Date().toISOString(),
+          accountId: account.accountId,
+          platform: account.platform,
+          message: error?.message || "Unknown account error",
+          detail: error?.stack?.slice?.(0, 4000) || String(error),
+        });
+      }
+
+      processed += 1;
+
+      failed = results.filter((r) => r.status === "failed").length;
+
+      await patchJob(env, jobId, {
+        processed,
+        updated,
+        unchanged,
+        skipped,
+        failed,
+        progressPercent: calcProgress(processed, totalAccounts),
+        statusText:
+          processed >= totalAccounts
+            ? "finalizing"
+            : `processing ${processed}/${totalAccounts}`,
+      });
+    }
+
+    const finishedAt = new Date().toISOString();
+
+    const summary: RunSummary = {
+      ok: true,
+      startedAt,
+      finishedAt,
+      totalAccounts,
+      checked: processed,
+      updated,
+      unchanged,
+      skipped,
+      failed,
+      dryRun: !!opts.dryRun,
+      results,
+    };
+
+    await patchJob(env, jobId, {
+      status: "done",
+      finishedAt,
+      progressPercent: 100,
+      statusText: "done",
+      error: null,
       result: summary,
-      error: null
     });
+
+    const settings = await getSettings(env);
+    settings.last_synced_at = finishedAt;
+    await putSettings(env, settings);
 
     return summary;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "unknown_error";
+  } catch (fatal: any) {
+    const finishedAt = new Date().toISOString();
 
-    await putCurrentJob(env, {
-      ...job,
+    await patchJob(env, jobId, {
       status: "failed",
-      finishedAt: new Date().toISOString(),
-      result: null,
-      error: message
+      finishedAt,
+      progressPercent: calcProgress(processed, totalAccounts),
+      statusText: "failed",
+      error: fatal?.message || "Fatal job error",
+      result: {
+        ok: false,
+        error: fatal?.message || "Fatal job error",
+        results,
+      },
     });
 
-    throw error;
+    throw fatal;
   }
 }
 
 export default {
-  async fetch(
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext
-  ): Promise<Response> {
-    void ctx;
-
+  async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === "/health" && request.method === "GET") {
-      return json({
-        ok: true,
-        service: "ops-scraper",
-        now: new Date().toISOString()
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "access-control-allow-origin": "*",
+          "access-control-allow-methods": "GET,POST,OPTIONS",
+          "access-control-allow-headers": "content-type",
+        },
       });
     }
 
-    if (url.pathname === "/progress" && request.method === "GET") {
-      const data = await env.DB.get("scraper:progress", { type: "json" });
-      return json(data || { progressPercent: 0, totalAccounts: 0, processed: 0, status: "idle" });
-    }
-
-    if (url.pathname === "/current-job" && request.method === "GET") {
-      const data = await env.DB.get("scraper:current_job", { type: "json" });
-      return json(
-        data || {
-          id: null,
-          mode: null,
-          accountId: null,
-          status: "idle",
-          startedAt: null,
-          finishedAt: null,
-          result: null,
-          error: null
-        }
-      );
-    }
-
-    if (url.pathname === "/run" && request.method === "POST") {
-      if (!hasValidRunToken(request, env)) return unauthorized();
-      const summary = await runAndTrackJob(env);
-      return json(summary);
-    }
-
-    if (url.pathname === "/run-one" && request.method === "POST") {
-      if (!hasValidRunToken(request, env)) return unauthorized();
-
-      let body: { accountId?: string } = {};
-      try {
-        body = await request.json();
-      } catch {}
-
-      const accountId = String(body.accountId || "").trim();
-      if (!accountId) {
-        return json({ ok: false, error: "accountId is required" }, { status: 400 });
+    try {
+      if (url.pathname === "/health") {
+        return json({ ok: true });
       }
 
-      const summary = await runAndTrackJob(env, { accountId });
-      return json(summary);
+      if (url.pathname === "/job" && request.method === "POST") {
+        const body = await request.json().catch(() => ({}));
+        const mode = body?.mode === "account" ? "account" : "all";
+        const accountId = typeof body?.accountId === "string" ? body.accountId : null;
+
+        const jobId = getJobId();
+        await createJob(env, {
+          id: jobId,
+          mode,
+          accountId,
+        });
+
+        const clients = await getClients(env);
+        const settings = await getSettings(env);
+        const accounts = flattenActiveAccounts(clients, settings, accountId);
+        const dryRun = !!settings.dry_run;
+
+        const summary = await runScrapeJob(env, jobId, accounts, { dryRun });
+
+        return json({
+          id: jobId,
+          mode,
+          accountId,
+          status: "done",
+          startedAt: summary.startedAt,
+          finishedAt: summary.finishedAt,
+          result: summary,
+        });
+      }
+
+      if (url.pathname.startsWith("/job/") && request.method === "GET") {
+        const jobId = url.pathname.split("/").pop() || "";
+        const raw = await env.DB.get(`job:${jobId}`);
+
+        if (!raw) {
+          return json({ ok: false, error: "Job not found" }, 404);
+        }
+
+        return new Response(raw, {
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "cache-control": "no-store",
+            "access-control-allow-origin": "*",
+          },
+        });
+      }
+
+      if (url.pathname === "/debug/queue" && request.method === "GET") {
+        const raw = await env.DB.get("queue");
+        return new Response(raw || "[]", {
+          headers: { "content-type": "application/json; charset=utf-8" },
+        });
+      }
+
+      return json({ ok: false, error: "Not found" }, 404);
+    } catch (error: any) {
+      return json(
+        {
+          ok: false,
+          error: error?.message || "Unknown server error",
+          detail: error?.stack || null,
+        },
+        500
+      );
     }
-
-    return json({ ok: false, error: "not_found" }, { status: 404 });
   },
-
-  async scheduled(
-    event: ScheduledEvent,
-    env: Env,
-    ctx: ExecutionContext
-  ): Promise<void> {
-    void event;
-    ctx.waitUntil(runAndTrackJob(env));
-  }
 };
