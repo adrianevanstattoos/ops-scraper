@@ -1,111 +1,112 @@
-import type { Env } from "./types";
+import type {
+  AccountJob,
+  ClientRecord,
+  Env,
+  QueueItem,
+  SeenRecord,
+  SettingsRecord,
+} from "../types";
 
-/**
- * Base helpers
- */
-async function getJson<T>(env: Env, key: string, fallback: T): Promise<T> {
-  const raw = await env.DB.get(key);
-  if (!raw) return fallback;
-
+export async function getClients(env: Env): Promise<ClientRecord[]> {
+  const raw = await env.DB.get("clients");
+  if (!raw) return [];
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return fallback;
+    return [];
   }
 }
 
-async function putJson(env: Env, key: string, value: unknown) {
-  await env.DB.put(key, JSON.stringify(value));
+export async function getSettings(env: Env): Promise<SettingsRecord> {
+  const raw = await env.DB.get("settings");
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
 }
 
-/**
- * CLIENTS
- */
-export async function getClients(env: Env) {
-  return getJson(env, "clients", []);
+export async function putSettings(env: Env, settings: SettingsRecord): Promise<void> {
+  await env.DB.put("settings", JSON.stringify(settings));
 }
 
-export async function putClients(env: Env, clients: unknown) {
-  await putJson(env, "clients", clients);
+export function flattenActiveAccounts(
+  clients: ClientRecord[],
+  settings: SettingsRecord,
+  targetAccountId?: string | null
+): AccountJob[] {
+  const allowedPlatforms = new Set(
+    Array.isArray(settings.default_platforms) && settings.default_platforms.length
+      ? settings.default_platforms
+      : ["instagram", "youtube", "tiktok", "facebook"]
+  );
+
+  const jobs: AccountJob[] = [];
+
+  for (const client of clients) {
+    if (client.active === false) continue;
+    const accounts = Array.isArray(client.accounts) ? client.accounts : [];
+
+    for (const account of accounts) {
+      if (account.active === false) continue;
+      if (!account.profileUrl) continue;
+      if (!allowedPlatforms.has(account.platform)) continue;
+      if (targetAccountId && account.id !== targetAccountId) continue;
+
+      jobs.push({
+        clientId: client.id,
+        clientName: client.name,
+        accountId: account.id,
+        platform: account.platform,
+        handle: account.handle,
+        profileUrl: account.profileUrl,
+        package: client.package,
+      });
+    }
+  }
+
+  return jobs;
 }
 
-/**
- * SETTINGS
- */
-export async function getSettings(env: Env) {
-  return getJson(env, "settings", {
-    dry_run: false,
-    sync_enabled: true,
-    default_platforms: ["instagram", "facebook", "tiktok", "youtube"]
-  });
-}
-
-export async function updateLastSyncedAt(env: Env, settings: any, ts: string) {
-  settings.last_synced_at = ts;
-  await putJson(env, "settings", settings);
-}
-
-/**
- * SEEN
- */
-export async function getSeen(env: Env, accountId: string) {
+export async function getSeen(env: Env, accountId: string): Promise<SeenRecord | null> {
   const raw = await env.DB.get(`seen:${accountId}`);
-  if (!raw) return null;
+  return raw ? JSON.parse(raw) : null;
+}
 
+export async function putSeen(env: Env, accountId: string, value: SeenRecord): Promise<void> {
+  await env.DB.put(`seen:${accountId}`, JSON.stringify(value));
+}
+
+export async function getQueue(env: Env): Promise<QueueItem[]> {
+  const raw = await env.DB.get("queue");
+  if (!raw) return [];
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return null;
+    return [];
   }
 }
 
-export async function putSeen(
-  env: Env,
-  accountId: string,
-  value: { postUrl: string; seenAt: string }
-) {
-  await putJson(env, `seen:${accountId}`, value);
+export async function putQueue(env: Env, items: QueueItem[]): Promise<void> {
+  await env.DB.put("queue", JSON.stringify(items));
 }
 
-/**
- * SCRAPE META (cooldown tracking)
- */
-export async function getScrapeMeta(env: Env, accountId: string) {
-  return getJson(env, `scrape_meta:${accountId}`, null);
-}
+export async function enqueueIfNew(env: Env, item: QueueItem): Promise<boolean> {
+  const queue = await getQueue(env);
 
-export async function putScrapeMeta(
-  env: Env,
-  accountId: string,
-  value: {
-    lastAttemptAt: string;
-    lastSuccessAt?: string | null;
-    lastStatus?: string | null;
-    lastLatestContentUrl?: string | null;
-  }
-) {
-  await putJson(env, `scrape_meta:${accountId}`, value);
-}
+  const alreadyQueued = queue.some(
+    (q) =>
+      q.accountId === item.accountId &&
+      q.postUrl === item.postUrl &&
+      q.status !== "completed"
+  );
 
-/**
- * LATEST CACHE (result caching)
- */
-export async function getLatestCache(
-  env: Env,
-  platform: string,
-  accountId: string
-) {
-  return getJson(env, `latest_cache:${platform}:${accountId}`, null);
-}
+  if (alreadyQueued) return false;
 
-export async function putLatestCache(
-  env: Env,
-  platform: string,
-  accountId: string,
-  data: unknown
-) {
-  await putJson(env, `latest_cache:${platform}:${accountId}`, {
-    savedAt: new Date().toISOString(),
-    data
-  });
+  queue.unshift(item);
+  await putQueue(env, queue);
+  return true;
 }
