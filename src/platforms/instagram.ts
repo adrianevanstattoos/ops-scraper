@@ -1,6 +1,5 @@
 import type { AccountJob, LatestContent, Env } from "../lib/types";
 
-const REQUEST_TIMEOUT_MS = 15000;
 const MAX_ATTEMPTS = 3;
 
 function sleep(ms: number): Promise<void> {
@@ -9,10 +8,6 @@ function sleep(ms: number): Promise<void> {
 
 function cleanString(value: unknown): string {
   return String(value ?? "").trim();
-}
-
-function randomItem<T>(items: T[]): T {
-  return items[Math.floor(Math.random() * items.length)];
 }
 
 function normalizeInstagramProfileUrl(url: string, handle?: string): string {
@@ -210,10 +205,12 @@ function extractInstagramPostUrl(html: string): {
 }
 
 function isLikelyLoginWall(html: string): boolean {
-  const sample = html.slice(0, 12000).toLowerCase();
+  const sample = html.slice(0, 20000).toLowerCase();
   return (
-    sample.includes("instagram") &&
-    (sample.includes("log in") || sample.includes("login") || sample.includes("sign up"))
+    sample.includes('name="username"') ||
+    sample.includes('name="enc_password"') ||
+    sample.includes("accounts/login") ||
+    sample.includes("login_and_signup_page")
   );
 }
 
@@ -226,15 +223,13 @@ function isLikelyRateLimitPage(html: string): boolean {
   );
 }
 
-// ─────────────────────────────────────────────────────────────
-// New ScrapFly helper (this is the magic)
 async function scrapeWithScrapFly(targetUrl: string, apiKey: string): Promise<string> {
   const scrapeUrl = `https://api.scrapfly.io/scrape?key=${apiKey}&url=${encodeURIComponent(targetUrl)}&asp=true&country=us&render_js=false`;
 
   const resp = await fetch(scrapeUrl, {
     method: "GET",
     headers: { accept: "application/json" },
-    cf: { cacheTtl: 0, cacheEverything: false },
+    cf: { cacheTtl: 0, cacheEverything: false }
   });
 
   if (!resp.ok) {
@@ -248,10 +243,9 @@ async function scrapeWithScrapFly(targetUrl: string, apiKey: string): Promise<st
     throw new Error(`ScrapFly returned error: ${data.message || JSON.stringify(data)}`);
   }
 
-  return data.result.content; // full HTML
+  return data.result.content;
 }
 
-// ─────────────────────────────────────────────────────────────
 export async function getLatestInstagramContent(
   account: AccountJob,
   env: Env
@@ -276,15 +270,23 @@ export async function getLatestInstagramContent(
       }
 
       if (isLikelyLoginWall(html)) {
-        return null;
+        throw new Error("Instagram returned a login wall");
       }
 
       const { url, matchedBy } = extractInstagramPostUrl(html);
       const contentType = inferInstagramContentType(url);
       const contentId = extractInstagramContentId(url);
 
-      if (!url || !contentId || !contentType) {
-        return null;
+      if (!url) {
+        throw new Error("No Instagram post or reel URL found in profile HTML");
+      }
+
+      if (!contentId) {
+        throw new Error(`Could not extract Instagram content ID from URL: ${url}`);
+      }
+
+      if (!contentType) {
+        throw new Error(`Could not infer Instagram content type from URL: ${url}`);
       }
 
       return {
