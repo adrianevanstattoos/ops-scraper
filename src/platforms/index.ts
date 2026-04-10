@@ -1,23 +1,27 @@
-import type { AccountJob, LatestContent, Env } from "../lib/types";
-import { getLatestFacebookContent } from "./facebook";
-import { getLatestInstagramContent } from "./instagram";
-import { getLatestTikTokContent } from "./tiktok";
-import { getLatestYouTubeContent } from "./youtube";
+import type { AccountJob, Env, LatestContentResult } from "../types";
+import { getLatestInstagram } from "./instagram";
+import { getLatestYoutube } from "./youtube";
+import { getLatestTikTok } from "./tiktok";
+import { getLatestFacebook } from "./facebook";
 
-export async function getLatestContentForAccount(
-  account: AccountJob,
-  env: Env                     // ← added
-): Promise<LatestContent | null> {
+export async function getLatestForPlatform(
+  env: Env,
+  account: AccountJob
+): Promise<LatestContentResult> {
   switch (account.platform) {
-    case "youtube":
-      return getLatestYouTubeContent(account);
     case "instagram":
-      return getLatestInstagramContent(account, env);   // ← now passes env
+      return getLatestInstagram(env, account.profileUrl);
+    case "youtube":
+      return getLatestYoutube(env, account.profileUrl);
     case "tiktok":
-      return getLatestTikTokContent(account);
+      return getLatestTikTok(env, account.profileUrl);
     case "facebook":
-      return getLatestFacebookContent(account);
+      return getLatestFacebook(env, account.profileUrl);
     default:
-      return null;
+      return {
+        ok: false,
+        reason: "unsupported_platform",
+        source: "unknown",
+      };
   }
 }
