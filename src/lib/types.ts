@@ -1,6 +1,7 @@
 export interface Env {
   DB: KVNamespace;
-  SCRAPFLY_API_KEY?: string;   // ← added
+  SCRAPFLY_API_KEY?: string;
+  SCRAPER_RUN_TOKEN?: string;
 }
 
 export type Platform = "instagram" | "facebook" | "tiktok" | "youtube";
