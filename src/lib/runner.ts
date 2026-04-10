@@ -1,5 +1,5 @@
 import { flattenActiveAccounts, findAccountJobById } from "./flatten";
-import { getClients, getSettings, putSeen, updateLastSyncedAt } from "./kv";
+import { getClients, getSettings, getSeen, putSeen, updateLastSyncedAt } from "./kv";
 import type { AccountJob, AccountRunResult, Env, RunSummary } from "./types";
 import { getLatestContentForAccount } from "../platforms";
 
@@ -20,15 +20,25 @@ function isInstagramRateLimitError(message: string): boolean {
   return msg.includes("429") || msg.includes("rate limit");
 }
 
-// NEW: Progress tracking in KV
-async function updateProgress(env: Env, progress: number, total: number, status: string) {
-  await env.DB.put("scraper:progress", JSON.stringify({
-    progressPercent: progress,
-    totalAccounts: total,
-    processed: Math.round((progress / 100) * total),
-    status,
-    updatedAt: new Date().toISOString()
-  }), { expirationTtl: 300 }); // expires after 5 min
+async function updateProgress(
+  env: Env,
+  processed: number,
+  total: number,
+  status: string
+) {
+  const progressPercent = total > 0 ? Math.round((processed / total) * 100) : 100;
+
+  await env.DB.put(
+    "scraper:progress",
+    JSON.stringify({
+      progressPercent,
+      totalAccounts: total,
+      processed,
+      status,
+      updatedAt: new Date().toISOString()
+    }),
+    { expirationTtl: 300 }
+  );
 }
 
 async function maybePauseBeforeAccount(account: AccountJob): Promise<void> {
@@ -49,7 +59,7 @@ async function runOneAccount(
   account: AccountJob,
   dryRun: boolean
 ): Promise<AccountRunResult> {
-  const latest = await getLatestContentForAccount(account, env);   // ← fixed + env passed
+  const latest = await getLatestContentForAccount(account, env);
 
   if (!latest?.latestContentUrl) {
     return {
@@ -123,7 +133,7 @@ export async function runScrape(
 
   if (!settings.sync_enabled) {
     summary.finishedAt = new Date().toISOString();
-    await updateProgress(env, 100, 0, "skipped (sync disabled)");
+    await updateProgress(env, 0, 0, "skipped (sync disabled)");
     return summary;
   }
 
@@ -134,7 +144,7 @@ export async function runScrape(
     if (!one) {
       summary.ok = false;
       summary.finishedAt = new Date().toISOString();
-      await updateProgress(env, 100, 0, "failed (account not found)");
+      await updateProgress(env, 0, 0, "failed (account not found)");
       return summary;
     }
     jobs = [one];
@@ -144,13 +154,18 @@ export async function runScrape(
 
   summary.totalAccounts = jobs.length;
 
+  if (jobs.length === 0) {
+    summary.finishedAt = new Date().toISOString();
+    await updateProgress(env, 0, 0, "completed (no active accounts)");
+    return summary;
+  }
+
   for (let i = 0; i < jobs.length; i++) {
     const account = jobs[i];
-    const percent = Math.round(((i + 1) / jobs.length) * 100);
 
     try {
       await maybePauseBeforeAccount(account);
-      await updateProgress(env, percent, jobs.length, `processing ${i + 1}/${jobs.length}`);
+      await updateProgress(env, i, jobs.length, `processing ${i + 1}/${jobs.length}`);
 
       summary.checked += 1;
       const result = await runOneAccount(env, account, settings.dry_run);
@@ -175,6 +190,8 @@ export async function runScrape(
 
       await maybePauseAfterFailure(account, reason);
     }
+
+    await updateProgress(env, i + 1, jobs.length, `processed ${i + 1}/${jobs.length}`);
   }
 
   const finishedAt = new Date().toISOString();
@@ -184,6 +201,6 @@ export async function runScrape(
     await updateLastSyncedAt(env, settings, finishedAt);
   }
 
-  await updateProgress(env, 100, jobs.length, summary.ok ? "completed" : "completed with errors");
+  await updateProgress(env, jobs.length, jobs.length, summary.ok ? "completed" : "completed with errors");
   return summary;
 }
