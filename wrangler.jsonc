@@ -1,16 +1,12 @@
 {
   "name": "ops-scraper",
   "main": "src/index.ts",
-  "compatibility_date": "2026-03-18",
+  "compatibility_date": "2026-04-10",
 
   "kv_namespaces": [
     {
       "binding": "DB",
       "id": "8c5259d740fa47a78af254bbee9404b2"
     }
-  ],
-
-  "triggers": {
-    "crons": ["*/15 * * * *"]
-  }
+  ]
 }
